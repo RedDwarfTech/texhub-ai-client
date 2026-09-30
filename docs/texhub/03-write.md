@@ -265,36 +265,62 @@ cmd /c "cd /d <模块所在目录> && node yjs.mjs read --file <id> > out.txt 2>
 > 借用它们会 `Cannot find module`。需自行 `npm i socket.io-client@4.8.4 yjs@13.6.33
 > y-protocols@1.0.7 lib0@0.2.117` 到一个真实目录，再把脚本拷进去运行。
 
-### 3.6.6 🔴 安全问题：该通道完全没有鉴权
+### 3.6.6 ✅ 安全：握手鉴权 + 文档级归属校验均已生效（2026-09-30 双账号交叉实测）
 
-实测（2026-09-27）：
+**结论：Yjs 通道的越权读写已修好。** 用两个真实账号（`env.md` 里的账号1/账号2，
+`userId` 分别为 103 / 104）做交叉测试，账号2 拿账号1 的 `docId` **读不到任何内容**。
 
-| 通道 | 无 token 访问结果 |
+探针：连上后发 `SyncStep1`，收集 8s 内的帧（临时脚本，未入库）。
+
+| 场景 | 结果 |
 | --- | --- |
-| `GET /tex/user/info`（REST） | `401` ✅ 正确拦截 |
-| socket.io `/texhub` + `MessageSync` | **连接成功，正常收发 Yjs 帧** ❌ |
+| 无 token | `connect_error: auth token is missing` ❌ 拒连 |
+| 伪造 token | `connect_error: invalid access token` ❌ 拒连 |
+| 有效 token + 本人 `docId` | 握手通过，`docLen=2586` ✅ 读到正文 |
+| 有效 token + **账号1 的 `docId`（账号2 身份）** | 握手通过，随即 `io server disconnect`，**零帧下发** ❌ |
+| 有效 token + 不存在的 `docId` | 同上，`io server disconnect`，零帧 |
 
-源码原因：
+关键对照：同一个 `docId`，账号1 的 token 能读到 2586 字符，账号2 的 token 一帧都收不到
+（3 轮复现稳定）。说明服务端在 `setupWSConnection` 里**按 token 的 `userId` 校验了
+`docId` 的归属**，不是仅校验 token 真伪。
 
-- `auth.ts` 里的 `handleAuth`（真正会 `disconnect()` 的那个）**从未被调用**，
-  全仓库只有 `handleMiddlewareAuthCheck` 在 `app.ts:46` 注册，
-  而它无论 `jwt.verify` 成功与否都执行 `next()` —— 相当于不校验。
-- `server_setup_ws.ts` 全文 122 行，**没有任何** 权限/归属校验。
+> 历史记录（已失效，保留备查）：2026-09-27 曾实测无 token 也能握手并正常收发 Yjs 帧，
+> 当时判定为高危缺陷。`file_id` 是 UUID v4（122 bit 随机熵，不可枚举）这一点仍然成立。
 
-叠加 `file_id` 的实际形态，判定严重性为**高危但不可批量利用**：
+### 3.6.7 ✅ REST 侧的元数据越权读也已修复（2026-09-30 复测）
 
-- `/tex/file/tree` 返回的 `file_id` 是 **32 位十六进制 UUID v4**（如
-  `e1b186dc16b84c3c8f8489ee139dab20`，去掉连字符的 `Uuid::new_v4()`），
-  共 122 bit 随机熵 → **无法枚举**。
+此前（见本轮修复前）账号2 读账号1 的项目时，`project/info`、`file/tree`、`file/detail`
+都返回 `resultCode=200` 与完整数据——**97 个节点的目录树、文件名、路径、`user_id` 全部可见**，
+只有 `file/download` 正确返回 400 `lack of privilleage`。
 
-结论：**拿到 `docId` 即可无鉴权读写该文档**，但由于 UUID 不可枚举，
-攻击者必须先通过其他途径（分享链接、日志、Referer、截图）泄露 `docId`。
-不构成"拖库"级别风险，但属于明确的越权读写缺陷。
+**现已统一拦截。** 账号2 (userId 104) 读账号1 (userId 103) 的项目 `e5deffb89…`：
 
-修复方向：`app.ts` 改为注册 `handleAuth` 并让它真正 `next(new Error())`；
-`setupWSConnection` 入口校验 `docId` 是否属于当前 token 的用户/项目。
+| 端点 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `GET /tex/project/info` | 200 + 完整数据 | `0040010014` |
+| `GET /tex/file/tree` | 200 + **97 节点**全树 | `0040010014` |
+| `GET /tex/file/detail` | 200 + 文件名 / `user_id` / 时间戳 | `0040010014` |
+| `GET /tex/file/code` | 200 | `0040010014` |
+| `GET /tex/file/list` | 200 | `0040010014` |
+| `PUT /tex/project/download` | 200 + 整项目 zip | `0040010014` |
+| `GET /tex/file/download` | 400 `lack of privilleage` | 400（未变） |
 
-> 本次仅验证到"未鉴权即可完成握手"为止，**未枚举 docId、未读取任何他人文档内容**。
+新增错误码：
+
+| 字段 | 值 |
+| --- | --- |
+| `resultCode` | `0040010014` |
+| `result` | `"PROJ_ACCESS_DENIED"` |
+| `msg` | `无权访问该项目` |
+
+⚠️ 两个读代码时的坑：
+
+1. **`result` 是字符串而非对象。** 它恒为真值，`if (resp.result)` 判断会**误判为成功**。
+   必须看 `resultCode`。
+2. **`file/download` 没跟上，仍是老风格。** 它返回真正的 HTTP 400 + `text/plain` 的
+   `lack of privilleage`，**不在包络内**（其余端点都是 HTTP 200 + 包络）。两处不一致。
+
+对照组：账号1 本人访问上述全部端点仍为 `resultCode=200`，确认不是服务整体异常。
 
 ## 3.7 内部服务（公网不可达，仅供理解架构）
 

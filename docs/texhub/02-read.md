@@ -117,6 +117,11 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 - 返回的是**文件原始字节**，不是 JSON 包络；需自行判断/捕获错误
 - 要求调用者是项目协作者（`get_collar_relation`），否则 400 `lack of privilleage`
+
+> ⚠️ **本接口尚未统一到包络风格**：非协作者拿到的是**真正的 HTTP 400** + `text/plain` 的
+> `lack of privilleage`，而其余端点（`project/info`、`file/tree`、`file/detail` 等）
+> 返回 HTTP 200 + `resultCode=0040010014` `PROJ_ACCESS_DENIED`。见
+> [03-write](03-write.md) 3.6.7。
 - 图片等二进制同样适用
 
 ## 2.5 整项目拉取（推荐用于备份/全量对比）

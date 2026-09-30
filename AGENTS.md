@@ -27,7 +27,11 @@ TeXHub项目的代码在目录：E:\dolphin\texhub-ai
 3. **响应永远是 HTTP 200**，成败看 body 里的 `resultCode`（成功为 `"200"`）。
 4. **`GET /tex/file/code` 会静默返回空串**给子目录文件（源码未拼接 `file_path`）。读子目录文件一律用 `GET /tex/file/download`。
 
-另外，Yjs 通道目前**完全没有鉴权**（详见 `docs/texhub/03-write.md` 第 3.6.6 节）：无 token 也能握手，REST 则正确返回 401。`file_id` 是 UUID v4（122 bit 随机熵，**不可枚举**），所以拿到 `docId` 就能越权读写该文档，但无法批量拖库——属高危而非致命。这是平台自身的安全缺陷，已如实记录待修。
+Yjs 通道**鉴权与文档级归属校验均已生效**（2026-09-30 双账号交叉实测，此前"无鉴权"的记录已作废）：握手阶段即校验 `access_token`，无 token 报 `connect_error: auth token is missing`，伪造/过期 token 报 `connect_error: invalid access token`；用**他人项目的 `docId`** 连接会被服务端主动 `disconnect`（`io server disconnect`）且**一帧内容都不下发**（已用两个真实账号交叉验证：同一 `docId`，本人 token 读到 2586 字符，他人 token 零帧，3 轮稳定）。详见 `docs/texhub/03-write.md` 第 3.6.6 节。
+
+> 但 **REST 侧的元数据越权读也已修复**（2026-09-30 双账号复测）：他人账号读你项目的 `project/info`、`file/tree`、`file/detail`、`file/code`、`file/list`、`project/download`，现在统一返回 `resultCode=0040010014`（`result` 是字符串 `"PROJ_ACCESS_DENIED"`，`msg` 为「无权访问该项目」），**97 个节点的文件树不再泄漏**。注意 `file/download` 仍是老风格——真 HTTP 400 + `lack of privilleage`，不在包络内。
+>
+> 🔴 读这个错误码时有个坑：**`result` 是字符串 `"PROJ_ACCESS_DENIED"`，恒为真值**，`if (resp.result)` 会误判为成功。仍须一律看 `resultCode`。
 
 同步时另有两个已踩过的坑（详见 `docs/texhub/03-write.md` 第 3.6.5 节）：Yjs 的 `docId` 必须用 `/tex/file/tree` 返回的 UUID，用 `/tex/project/info` 的 `main_file.id`（snowflake）会连到空文档；且 WebSocket 很不稳定，日常同步优先用 REST `/tex/file/download`（实测与 Yjs 内容 10/10 一致）。
 
